@@ -1,41 +1,56 @@
 # Foundry AI MCP — Scope, Requirements & Specification
 
 **Project:** `foundry-ai-mcp`
-**Status:** Draft v0.1 (pre-implementation)
-**Target:** Foundry Virtual Tabletop v14 (LTS) — minimum and verified. v13 is not supported.
-**License:** MIT
+**Status:** Draft v0.2 (pre-implementation)
+**Target platform:** Foundry Virtual Tabletop v14 (LTS) — minimum and verified. v13 unsupported.
+**Target game system:** D&D 5e only.
+**Primary clients:** Claude Cowork and ChatGPT (Work/Business, Developer mode) — **cloud-hosted agents**.
+**License:** MIT, permanently. No open-core, no paid tier, no project-operated infrastructure.
 
 ---
 
 ## 1. Executive summary
 
-A two-part open-source system that lets a Game Master drive Foundry VTT through
-natural-language conversation with **their own AI account** — no vendor
-subscription, no third-party inference service, no telemetry.
+An open-source system that lets a GM run a D&D 5e campaign in Foundry VTT by
+talking to their own AI agent in Claude Cowork or ChatGPT.
 
-1. **The Module** (`foundry-ai-mcp`) — a Foundry VTT add-on module that runs in the
-   GM's browser session and exposes the full GM capability surface (documents,
-   canvas, combat, dice, chat, audio, permissions) behind a safe, audited,
-   undoable operation layer. Optionally provides an in-Foundry chat sidebar.
-2. **The MCP Server** (`@rashthepay/foundry-mcp`) — a local Node process speaking
-   [Model Context Protocol](https://modelcontextprotocol.io) to any MCP client
-   (Claude Desktop, Claude Code, claude.ai, Cursor, …), translating tool calls
-   into module operations over a local WebSocket bridge.
+1. **The Module** (`foundry-ai-mcp`) — a Foundry v14 add-on that runs in a GM
+   browser session and executes the full GM capability surface behind a safe,
+   audited, undoable operation layer.
+2. **The Server** (`@rashthepay/foundry-mcp`) — a self-hosted service exposing a
+   **public HTTPS MCP endpoint** that Cowork and ChatGPT connect to, bridged over
+   WebSocket to the module.
+
+### The constraint that defines the architecture
+
+Claude custom connectors — on claude.ai, Claude Desktop, **and Cowork** — connect
+to your MCP server **from Anthropic's cloud infrastructure, not from your
+machine**. Local stdio servers configured in `claude_desktop_config.json` are
+[not available in Cowork or claude.ai](https://support.claude.com/en/articles/11175166-get-started-with-custom-connectors-using-remote-mcp).
+ChatGPT's Developer mode likewise takes a remote HTTPS MCP URL.
+
+> **Therefore: a localhost stdio MCP server cannot serve this project's stated goal.**
+> The server must be publicly reachable over HTTPS and authenticated.
+
+This inverts the usual Foundry-MCP design (every existing project is
+localhost/stdio) and drives §4, §7 and §8. It is the single most consequential
+decision in this document.
 
 ### Positioning
 
 | | Familiar | adambdooley/foundry-vtt-mcp | **foundry-ai-mcp** |
 |---|---|---|---|
-| Model access | Vendor subscription or BYO OpenAI-compatible key | BYO Claude subscription via MCP | **BYO account — MCP client _or_ in-Foundry panel** |
-| Cost | Paid subscription | Free | **Free, MIT** |
-| Chat surface | In-Foundry | External client only | **Both** |
+| Where the agent runs | In Foundry | Local Claude Desktop | **Cowork / ChatGPT, from anywhere** |
+| Transport | Vendor / OpenAI-compatible API | stdio, localhost | **Public HTTPS MCP + OAuth** |
+| Cost | Paid subscription | Free | **Free, MIT forever** |
 | Write scope | Curated GM actions | ~41 curated tools | **Full document/canvas surface + escape hatch** |
-| Safety | Vendor-defined | Read-only toggle | **Mode matrix, dry-run, confirm, transaction log, undo** |
-| Systems | Several, curated | 6 systems | **Schema-driven generic + adapters (5e, PF2e)** |
+| Safety | Vendor-defined | Read-only toggle | **Mode matrix, dry-run, snapshots, transaction log, undo** |
+| Images | Generation built in | ComfyUI integration | **Upload from URL/HTTP/bytes; no generation** |
+| Systems | Several | 6 systems | **D&D 5e** |
 
-**The differentiators worth building for:** (a) transactional undo, (b) runtime
-schema discovery instead of hardcoded per-system tools, (c) two front doors onto
-one capability core, (d) an explicit autonomy/permission model.
+**Differentiators worth building for:** (a) it works from a cloud agent at all,
+(b) transactional undo, (c) runtime schema discovery, (d) an explicit autonomy
+model designed for *unattended* operation.
 
 ---
 
@@ -43,260 +58,287 @@ one capability core, (d) an explicit autonomy/permission model.
 
 ### Goals
 
-- **G1** — Anything a GM can do through the Foundry UI, an agent can do through a tool call.
-- **G2** — The GM's own AI account and credentials; nothing routed through project infrastructure.
-- **G3** — No irreversible surprise. Every mutation is logged, diffable, and undoable.
-- **G4** — System-agnostic by default; system adapters improve ergonomics, they are not a prerequisite.
-- **G5** — Works with hosted Foundry (Forge, Molten, self-hosted remote) as long as the GM's browser and the MCP server share a machine.
-- **G6** — Installable by a non-developer in under ten minutes.
+- **G1** — Anything a GM can do through the Foundry UI, the agent can do through a tool call.
+- **G2** — Runs from Claude Cowork or ChatGPT with no local client software beyond a browser.
+- **G3** — The GM's own AI account and self-hosted infrastructure. Nothing routed through project-operated services.
+- **G4** — No irreversible surprise. Every mutation is diffable, logged, snapshot-protected and undoable.
+- **G5** — The agent can put images into the world — sourced from the internet, generated in its own sandbox, or supplied by the GM.
+- **G6** — Deployable by a technically comfortable hobbyist in under an hour, with a `docker compose up` path.
+- **G7** — MIT forever.
 
-### Non-goals (v1)
+### Non-goals
 
-- Player-facing assistants with their own permissions (post-1.0).
-- Running without a GM browser session open (architecturally impossible — see §4.1).
-- Shipping copyrighted game content (statblocks, adventures, art).
-- Hosting an inference service, a relay, or any account system.
-- Image/map generation as a core dependency (optional integration only).
-- Voice I/O (post-1.0).
+| Not doing | Why |
+|---|---|
+| **Image/map generation** | The agent generates images itself if it can; this project only ingests them. |
+| **PF2e or other systems** | D&D 5e only. Keep a thin adapter seam, ship one implementation. |
+| **In-Foundry chat panel** | Deferred. The chat app *is* the interface; a panel would duplicate it and add per-token billing confusion. See §11. |
+| **Player-facing assistants** | Post-1.0. |
+| **Running with no GM browser session** | Architecturally impossible — but see the optional Agent Seat (§4.5). |
+| **Shipping game content** | Licensing. Import from the GM's own compendia only. |
+| **Any hosted service, account system, or telemetry** | G3, G7. |
+| **Voice I/O** | Post-1.0. |
 
 ---
 
-## 3. Personas & representative user stories
+## 3. Personas & user stories
 
-**P1 — Prep GM (async, between sessions).** Uses Claude Desktop/Code on a second monitor.
+**P1 — Prep GM (async, away from the table).** Cowork or ChatGPT on a laptop or phone.
 - "Read my Session 12 notes and build the three encounters I sketched, place them on the Ruined Chapel scene, and stat the cult leader as a CR 5 caster."
-- "Every NPC in my Journal folder 'Waterdeep' that doesn't have an actor — create one and link it."
-- "Summarise last session from the chat log into a recap journal page and show it to the players."
+- "Find a good portrait for Lady Velkaris, upload it, and set it as her actor art and token image."
+- "Every NPC in my 'Waterdeep' journal folder without an actor — create one and link it."
 
-**P2 — Live GM (mid-session, hands on the table).** Uses the in-Foundry chat panel.
-- "The party just set the tavern on fire. Give me a d20 table of consequences and roll on it."
+**P2 — Live GM (mid-session).** Chat app on a second monitor or tablet, Foundry on the main screen.
+- "The party set the tavern on fire. Give me a d20 consequence table and roll on it."
 - "Bandit 3 dashes to the balcony and shoots the wizard — resolve it."
-- "Everyone rolls a DC 15 Dexterity save."
+- "Everyone rolls a DC 15 Dex save."
 
-**P3 — World builder / tinkerer.** Bulk operations and data hygiene.
-- "Find every item in the world with no icon and assign one from the compendium."
-- "Convert all my v10-era journals to multi-page format."
-
-**P4 — Module developer.** Registers a system adapter or extends the tool surface.
+**P3 — World builder.** Bulk data operations and hygiene passes.
 
 ---
 
 ## 4. Architecture
 
-### 4.1 The binding constraint
+### 4.1 The two binding constraints
 
-Foundry's meaningful API (`game.actors`, `canvas`, `Document` classes, `Roll`,
-`Combat`) lives **client-side, in the browser**. There is no official server-side
-world API and modules do not execute on the Foundry server. Therefore:
+1. **Foundry's API is client-side.** `game.actors`, `canvas`, `Document`, `Roll` exist only in the browser; modules do not run on the Foundry server. **Every write must be executed by a browser session authenticated as a GM.**
+2. **The agent is in someone else's cloud.** It cannot reach localhost. **The server must be publicly reachable over HTTPS.**
 
-> Every write must be executed by a browser session authenticated as a GM user.
-
-The module is that execution arm. A GM tab must be open and connected. This is a
-hard constraint shared by every Foundry AI integration; it is stated up front
-rather than discovered in week three.
-
-Because a browser cannot accept inbound connections, the **module dials out** to
-the MCP-side bridge. Connection direction: `module (WS client) → daemon (WS server)`.
+Together these mean the system has three moving parts that must all be up: the
+cloud agent, a public HTTPS server, and a live GM browser session.
 
 ### 4.2 Components
 
 ```
-┌────────────────────┐        ┌──────────────────────────────────────┐
-│  MCP client        │ stdio  │  foundry-mcp (server)                │
-│  Claude Desktop /  │◄──────►│   ├─ tools / resources / prompts     │
-│  Claude Code / …   │  MCP   │   ├─ zod schemas (shared package)    │
-└────────────────────┘        │   └─ bridge client ──┐               │
-                              └──────────────────────┼───────────────┘
-                                                     │ local IPC
-┌────────────────────┐                     ┌─────────▼──────────────┐
-│  In-Foundry chat   │  Anthropic API      │  bridge daemon         │
-│  panel (optional)  │  (BYO key)          │  ws://127.0.0.1:31415  │
-│         │          │                     │  auth · multiplex      │
-└─────────┼──────────┘                     └─────────▲──────────────┘
-          │                                          │ WSS/WS + token
-┌─────────▼──────────────────────────────────────────┴──────────────┐
-│  foundry-ai-mcp module  (runs in GM's browser)                     │
-│   bridge client · op router · safety layer · txn log · adapters    │
-│                              ▼                                     │
-│              Foundry VTT client API (game.*, canvas.*)             │
-└────────────────────────────────────────────────────────────────────┘
+┌──────────────────────────────┐
+│  Claude Cowork / ChatGPT     │   agent runs in Anthropic's or
+│  (cloud)                     │   OpenAI's cloud
+└──────────────┬───────────────┘
+               │  HTTPS · Streamable HTTP MCP · OAuth 2.1
+               ▼
+┌──────────────────────────────────────────────────────────┐
+│  foundry-mcp  (self-hosted: VPS, home server, or tunnel) │
+│   ├─ MCP endpoint      /mcp      tools/resources/prompts │
+│   ├─ OAuth endpoints   /.well-known/*  /authorize /token │
+│   ├─ Asset intake      /assets/upload   (agent curl)     │
+│   ├─ Asset staging     /assets/stage/:token  (module GET)│
+│   └─ Bridge hub        /bridge   (WSS ← module)          │
+└──────────────┬───────────────────────────────────────────┘
+               │  WSS + bridge token   (module dials out)
+               ▼
+┌──────────────────────────────────────────────────────────┐
+│  foundry-ai-mcp module — in a GM browser session         │
+│   bridge client · op router · safety · txn log · 5e      │
+│                       ▼                                   │
+│         Foundry VTT v14 client API (game.*, canvas.*)     │
+└──────────────────────────────────────────────────────────┘
 ```
 
-**Why a separate daemon?** An MCP stdio server's lifetime is owned by its client —
-it dies when Claude Desktop closes, taking the module's socket with it. A small
-persistent daemon (auto-started, port-locked, shared) lets multiple MCP clients
-and the in-Foundry panel share one Foundry connection and survives client restarts.
-Single binary, two modes: `foundry-mcp serve --stdio` and `foundry-mcp daemon`.
+The browser dials out because browsers cannot accept inbound connections. The
+server is therefore a WebSocket *host* and an HTTPS *host*, and needs no inbound
+access to the GM's machine at all.
 
-### 4.3 Deployment topologies
+### 4.3 Where the server runs
 
-| Topology | Foundry server | GM browser | MCP server | Supported |
-|---|---|---|---|---|
-| T1 Local all-in-one | localhost | same machine | same machine | v1 ✅ |
-| T2 Hosted Foundry (Forge etc.) | remote | GM machine | GM machine | v1 ✅ |
-| T3 Foundry on LAN box | LAN | GM machine | GM machine | v1 ✅ |
-| T4 MCP on a different machine than browser | any | machine A | machine B | v1 ⚠️ requires LAN-bound daemon + token, documented but unsupported |
-| T5 Mobile / claude.ai web client | any | GM machine | needs public relay | post-1.0 ❌ |
+It must be reachable inbound from the agent cloud and outbound-reachable from the
+GM's browser. It does **not** need to be on the GM's machine.
 
-### 4.4 Two front doors, one core
+| Option | Best for | Notes |
+|---|---|---|
+| **Alongside self-hosted Foundry** (same VPS, subdomain) | Self-hosters | Cleanest. Real TLS cert, always up, reuse existing reverse proxy. **Recommended.** |
+| **Small VPS** ($5/mo) | Forge / Molten users | Foundry stays hosted; server runs separately. |
+| **Home server + Cloudflare Tunnel / Tailscale Funnel** | No VPS | Free, no port forwarding, TLS terminated by the tunnel. |
+| Localhost + ngrok | Development only | Ephemeral URL breaks the saved connector. |
 
-The module's **capability layer** is a single registry of operations with zod-validated
-inputs. Both the MCP server and the in-Foundry chat panel consume the *same* registry.
-The MCP server generates MCP tool definitions from it; the panel generates Anthropic
-tool definitions from it. Adding an operation exposes it to both surfaces at once.
+Anthropic publishes [egress IP ranges](https://platform.claude.com/docs/en/api/ip-addresses) for firewall allowlisting — worth using, but not a substitute for auth.
+
+### 4.4 Transports
+
+- **Streamable HTTP** at `/mcp` — the primary transport, required by both target clients.
+- **stdio** — retained as a secondary mode (`foundry-mcp --stdio`) purely for local development and Claude Code. Not the shipping path.
+
+### 4.5 The Agent Seat (optional, and the thing that makes P1 actually work)
+
+A GM browser session must be live for any operation to succeed. Requiring the GM
+to leave a tab open on a machine that is awake defeats "prep from my phone."
+
+The optional **Agent Seat** is a headless Chromium container (Playwright) that logs
+into the world as a dedicated GM user (`AI Agent`) and loads the module, keeping
+the bridge permanently up. Shipped as an opt-in service in the `docker compose`
+file next to the server.
+
+- Foundry licenses per server, not per user, so a dedicated GM user costs nothing.
+- ~400 MB RAM. Auto-restarts, re-authenticates, and reports health via `world.health_check`.
+- Actions appear in Foundry as that user, which makes the audit trail *better* — every agent change is attributable.
+- **Caveats:** the world must be running; some hosted providers restrict automation in their terms — check before pointing it at Forge; a second GM session is a second vector if the server is compromised.
+
+Without the Agent Seat the system still works — the GM just needs a Foundry tab open,
+which is the normal case for P2 (live play) and fine for P1 at a desk.
+
+### 4.6 One capability core
+
+The module holds a single registry of operations with zod-validated inputs; the
+server generates MCP tool definitions from it. The registry seam is kept so a
+future in-Foundry panel (§11) or a second protocol can reuse it without a rewrite,
+but only one consumer exists in v1.
 
 ---
 
-## 5. Capability surface — what "anything a GM can do" means
+## 5. Capability surface
 
-This is the scope definition. Each row is in v1 unless marked.
+Everything below is in scope for v1 unless marked.
 
 ### 5.1 World documents (CRUD)
 
 Actor, Item, Scene, JournalEntry, RollTable, Playlist, Macro, Cards, Combat,
-ChatMessage, Folder, User, Setting, plus embedded documents: ActiveEffect, Token,
-Tile, Wall, AmbientLight, AmbientSound, Drawing, MeasuredTemplate, Note, Region
-(v14's reworked regions system, including region behaviours),
-Combatant, JournalEntryPage, TableResult, PlaylistSound, and Items owned by Actors.
+ChatMessage, Folder, User, Setting; embedded: ActiveEffect, Token, Tile, Wall,
+AmbientLight, AmbientSound, Drawing, MeasuredTemplate, Note, Region (v14's
+reworked regions and region behaviours), Combatant, JournalEntryPage, TableResult,
+PlaylistSound, and Items owned by Actors.
 
-Operations: create, read, update (deep-merge or replace), delete, duplicate, move
-between folders, reorder (`sort`), set ownership, add/remove flags, batch variants
-of all of the above.
+Create, read, update (deep-merge or replace), delete, duplicate, move between
+folders, reorder, set ownership, flags — with batch variants of all.
 
 ### 5.2 Compendium packs
 
-List packs (world/system/module), full-text and filtered search, index reads,
-import documents into the world, export world documents into a pack, create and
-delete world compendiums, lock/unlock, folder structure inside packs.
+List packs, full-text and filtered search, index reads, import into the world,
+export to a pack, create/delete world compendiums, lock/unlock, pack folders.
 
 ### 5.3 Scene & canvas
 
-Create/clone/delete scenes; set background, foreground, dimensions, padding, grid
-(type, size, units, distance), initial view; activate vs. view; scene navigation
-order. Configure lighting: darkness level, global illumination, illumination colours,
-fog exploration, vision. Weather effects. Token vision toggles. **v14 additions in
-scope:** multi-level scenes (level definitions, per-level placement and token
-elevation binding) and shared fog of war (per-user vs. party-shared exploration).
+Create/clone/delete scenes; background, foreground, dimensions, padding, grid,
+initial view; activate vs. view; navigation order. Lighting: darkness, global
+illumination, colours, fog exploration, vision. Weather. **v14 features in scope:**
+multi-level scenes (level definitions, per-level placement, elevation binding) and
+shared fog of war.
 
-Place and edit walls (with door type, door state, sense restrictions, thresholds,
-directional flags), lights (dim/bright radius, angle, animation, colour), sounds
-(radius, easing, walls), tiles (with occlusion, video), drawings (shapes, text),
-notes (journal pins), regions (v12+ with behaviours), measured templates.
+Place and edit walls (door type/state, sense restrictions, thresholds, direction),
+lights, sounds, tiles, drawings, notes, regions with behaviours, measured templates.
 
-Runtime canvas: pan/zoom camera, ping a location, select/target tokens, toggle
-token visibility and elevation, move tokens (animated or teleport), reset or
-reveal fog of war, open/close/lock doors, cycle scene to players.
+Runtime: pan/zoom, ping, select/target tokens, toggle visibility and elevation,
+move tokens (animated or teleport), reset/reveal fog, door states, pull players to a scene.
 
 ### 5.4 Combat
 
-Create an encounter, add/remove combatants, roll initiative (per combatant,
-group, or all; with formula override), reorder, set turn, advance turn/round,
-step back, end combat, delete encounter. Read live combat state (order, HP,
-conditions, resources, targeted tokens). Apply damage and healing with type and
-resistance handling via the system adapter. Toggle status conditions. Award XP.
+Create encounters; add/remove combatants; roll initiative (single, group, all,
+formula override); reorder; set turn; advance/step back turn and round; end
+combat. Read live state (order, HP, conditions, resources, targets). Apply damage
+and healing with 5e type/resistance handling. Toggle conditions. Award XP.
 
-### 5.5 Dice & randomness
+### 5.5 Dice
 
-Evaluate any Foundry `Roll` formula with full data context; roll modes
-(public / GM-only / blind / self); roll as a specific speaker; roll tables with
-or without replacement; nested tables; recursive draws. **Request rolls from
-players**: post an actionable chat card to named users, then await or poll the
-result (see §7.5 events).
+Any `Roll` formula with proper `getRollData()` context; roll modes (public / GM /
+blind / self); roll as a speaker; roll tables with and without replacement; nested
+tables. **Request rolls from players** — post an actionable chat card to named
+users, then poll for the result (§7.5).
 
 ### 5.6 Chat
 
-Post messages as GM, as an actor (IC), as OOC, as emote; whisper to selected
-users; post rich HTML and enriched Foundry links (`@UUID[...]`); post roll
-messages; read recent history with filters; delete messages.
+Post as GM, as an actor (IC), OOC, emote; whisper; rich HTML and enriched
+`@UUID[...]` links; roll messages; read history with filters; delete.
 
 ### 5.7 Journals, tables, handouts
 
-Create multi-page journal entries (text, image, PDF, video pages); append to and
-edit pages; reorder pages; show a page or image to players; create and roll
-RollTables; generate quest/recap/lore content; create Cards decks.
+Multi-page journals (text, image, PDF, video pages); append and edit; reorder;
+show page or image to players; create and roll RollTables; Cards decks.
 
 ### 5.8 Audio
 
-List playlists and tracks; play, stop, pause, loop, crossfade; set channel and
-track volume; play a one-shot; control ambient sounds on scene.
+List playlists and tracks; play, stop, pause, loop, crossfade; channel and track
+volume; one-shots; scene ambient sounds.
 
-### 5.9 Macros & scripts
+### 5.9 Macros
 
-List, create, edit, delete macros (script and chat types); execute a macro with
-arguments; assign to hotbar.
+List, create, edit, delete (script and chat); execute with arguments; hotbar assignment.
 
-### 5.10 Users & permissions
+### 5.10 Users & settings
 
-List users (role, online status, assigned character); create/update users
-(post-1.0 for create); assign character; set document ownership levels; read and
-write module and system settings; toggle module settings.
+List users (role, online, assigned character); assign character; document
+ownership levels; read/write module and system settings.
 
-### 5.11 Escape hatch (expert mode, opt-in)
+### 5.11 Assets & images ⭐ new in v0.2
 
-- `system.execute_script` — arbitrary JS in the GM client with serialised result and console capture.
-- `system.call_api` — reflective invocation of a dotted API path with arguments.
+The agent cannot generate images — but it must be able to **get images into the
+world**, from three sources:
 
-These make "anything a GM can do" literally true and cover system-specific
-functionality no curated tool anticipates. Off by default; require explicit
-opt-in plus per-call confirmation; always logged verbatim.
+| Source | Path | Notes |
+|---|---|---|
+| **Found on the internet** | `assets.upload_image({ source: "url", url })` — server fetches | Cheapest. **The primary path.** |
+| **Generated by the agent** | Agent `POST`s bytes to `/assets/upload`, gets a handle, passes it to the tool | Cowork and ChatGPT sandboxes have shell/network; `curl` is the intended route. |
+| **Supplied by the GM** | GM drops files in a watched directory, or uploads via Foundry normally | `assets.list_files` makes them addressable. |
+| *(fallback)* Inline bytes | `source: "base64"`, hard-capped at 256 KB | See the token-cost warning in §18 — this is for icons, not maps. |
 
-### 5.12 Meta / session control
+Operations: upload, list directory, create directory, move, delete, and **bind** an
+uploaded asset to its use — actor portrait, prototype token art, token art on a
+specific token, scene background/foreground, tile texture, journal image page,
+item icon, note icon.
 
-Transaction log read, undo, snapshot & restore, autonomy mode switching,
-capability introspection, health check, kill switch.
+**Transfer mechanism.** Bridge frames cap at 1 MiB, so images are not sent over the
+WebSocket. Instead: the server acquires the bytes, stages them under a single-use
+token, and tells the module to `fetch()` the staging URL directly over HTTPS. The
+module turns the response into a `File` and calls Foundry's `FilePicker.upload()`.
+No chunking, and the browser does the transfer it is good at.
+
+**Hard requirements:**
+- **SSRF defence** — the model chooses the URL. Block private, loopback, link-local and cloud-metadata ranges (`169.254.169.254` especially); resolve DNS and re-check before connecting; follow at most 3 redirects and re-check each.
+- **Path confinement** — uploads confined to a configurable root (default `foundry-ai-mcp/` under Foundry's Data dir). Reject `..`, absolute paths, and anything resolving outside the root.
+- **Content validation** — verify magic bytes, not just the extension or `Content-Type`. Allowlist `png/jpg/webp/gif/webm/mp4/ogg`. **SVG denied by default** (it is script-capable and Foundry renders it inline).
+- **Size cap** — default 20 MB, configurable.
+- **Mixed content** — Foundry is served over HTTPS in every realistic deployment, so the staging URL must be HTTPS too, or the browser blocks the fetch.
+
+### 5.12 Escape hatch (expert mode, opt-in)
+
+`system.execute_script` (arbitrary JS in the GM client, serialised result and
+console capture) and `system.call_api` (reflective invocation of a dotted path).
+These make "anything a GM can do" literally true and cover 5e module interop no
+curated tool anticipates. Off by default, logged verbatim.
+
+### 5.13 Meta
+
+Transaction log, undo, snapshot/restore, autonomy mode, capability introspection,
+health check (including whether a GM session is actually connected), kill switch.
 
 ---
 
 ## 6. Tool design
 
-### 6.1 The tool-count problem
+### 6.1 Three layers
 
-A naive one-tool-per-capability mapping of §5 yields 150–200 tools. That degrades
-tool selection accuracy and burns context on every turn. The design response:
+A one-tool-per-capability mapping of §5 is 150–200 tools, which wrecks selection
+accuracy and burns context every turn. Instead:
 
-**Three layers.**
+1. **Ergonomic tools (~42)** — the high-frequency GM path, tight schemas, good descriptions.
+2. **Generic document tools (6)** — `query_documents`, `get_document`, `describe_schema`, `create_documents`, `update_documents`, `delete_documents`. These reach anything the ergonomic tools don't.
+3. **Escape hatch (2)** — §5.12, opt-in.
 
-1. **Ergonomic tools (~40)** — the high-frequency GM path, hand-written with tight
-   schemas and good descriptions. This is what the model reaches for 90% of the time.
-2. **Generic document tools (6)** — `documents.query`, `documents.get`,
-   `documents.create`, `documents.update`, `documents.delete`, `documents.describe_schema`.
-   These reach anything the ergonomic tools don't, in any game system, because the
-   model can discover the data model at runtime.
-3. **Escape hatch (2)** — §5.11, opt-in.
+**Tool profiles** — a setting selects what is advertised: `core` (~20) ·
+`standard` (~42, default) · `full` (~58) · `expert` (+escape hatch), with
+`notifications/tools/list_changed` on change.
 
-**Tool profiles.** A module setting selects which sets are advertised:
-`core` (~20) · `standard` (~40, default) · `full` (~55) · `expert` (+escape hatch).
-The MCP server emits `notifications/tools/list_changed` when the profile changes.
+**Runtime schema discovery.** `describe_schema({ type: "Actor", subtype: "npc" })`
+returns JSON Schema derived from the live `DataModel.schema` plus the system
+template, with real example values. Even single-system this earns its place: dnd5e's
+data model shifts across its own major versions, and this keeps the agent correct
+without the project chasing every release.
 
-**Runtime schema discovery** is the key to system-agnosticism.
-`documents.describe_schema({ type: "Actor", subtype: "npc" })` returns a JSON Schema
-derived from the live `DataModel.schema` plus the system's `template.json`, with
-example values pulled from an existing document. The model then writes correct
-`system.*` paths for *any* game system without the project shipping per-system code.
+### 6.2 Tool catalog
 
-### 6.2 Tool catalog (v1)
-
-Namespaced `verb_noun`, snake_case. `†` = mutating. `‡` = expert-only.
+`†` mutating · `‡` expert-only.
 
 **world** — `get_world_info`, `get_capabilities`, `health_check`
 
 **documents** — `query_documents`, `get_document`, `describe_schema`,
-`create_documents`†, `update_documents`†, `delete_documents`†, `duplicate_document`†,
-`manage_folders`†
+`create_documents`†, `update_documents`†, `delete_documents`†, `duplicate_document`†, `manage_folders`†
 
 **actors** — `list_actors`, `get_actor`, `create_actor_from_statblock`†,
 `modify_actor_resource`†, `manage_actor_items`†, `apply_effect`†, `set_ownership`†
 
-**compendium** — `list_packs`, `search_compendium`, `import_from_compendium`†,
-`export_to_compendium`†
+**compendium** — `list_packs`, `search_compendium`, `import_from_compendium`†, `export_to_compendium`†
 
-**scenes** — `list_scenes`, `get_scene`, `create_scene`†, `configure_scene`†,
-`activate_scene`†
+**scenes** — `list_scenes`, `get_scene`, `create_scene`†, `configure_scene`†, `activate_scene`†
 
-**canvas** — `place_objects`† (tokens/tiles/lights/sounds/notes/drawings/templates/regions),
-`update_placeables`†, `delete_placeables`†, `edit_walls`†, `move_token`†,
-`set_token_state`† (hidden/elevation/conditions/bar values), `control_camera`†
-(pan/zoom/ping/select/target), `manage_fog`†, `set_door_state`†
+**canvas** — `place_objects`†, `update_placeables`†, `delete_placeables`†,
+`edit_walls`†, `move_token`†, `set_token_state`†, `control_camera`†, `manage_fog`†, `set_door_state`†
 
 **combat** — `get_combat_state`, `start_combat`†, `manage_combatants`†,
 `roll_initiative`†, `advance_combat`†, `end_combat`†, `apply_damage`†, `toggle_condition`†
@@ -305,8 +347,9 @@ Namespaced `verb_noun`, snake_case. `†` = mutating. `‡` = expert-only.
 
 **chat** — `send_chat_message`†, `get_chat_history`, `delete_chat_messages`†
 
-**journal** — `create_journal`†, `update_journal_page`†, `show_to_players`†,
-`search_journals`
+**journal** — `create_journal`†, `update_journal_page`†, `show_to_players`†, `search_journals`
+
+**assets** ⭐ — `upload_image`†, `list_files`, `manage_files`†, `set_artwork`†
 
 **audio** — `list_audio`, `control_audio`†
 
@@ -316,256 +359,246 @@ Namespaced `verb_noun`, snake_case. `†` = mutating. `‡` = expert-only.
 
 **system** ‡ — `execute_script`†, `call_api`†
 
-**session** — `get_transaction_log`, `undo`†, `create_snapshot`†, `restore_snapshot`†,
-`set_autonomy_mode`†
+**session** — `get_transaction_log`, `undo`†, `create_snapshot`†, `restore_snapshot`†, `set_autonomy_mode`†
 
-### 6.3 Universal tool conventions
+### 6.3 Conventions
 
-Every mutating tool accepts:
-
-| Field | Type | Meaning |
-|---|---|---|
-| `dry_run` | boolean | Compute and return the diff; apply nothing. |
-| `reason` | string | One line shown in the confirmation dialog and audit log. |
-| `txn_group` | string | Group several calls into one undoable transaction. |
-
-Every read tool accepts `limit` (default 25), `cursor`, and `fields` (projection —
-critical for keeping large Actor payloads out of context).
-
-Every response returns:
+Mutating tools take `dry_run` (compute and return the diff, apply nothing),
+`reason` (one line, shown in confirmations and the audit log) and `txn_group`
+(bundle calls into one undoable transaction). Read tools take `limit` (default 25),
+`cursor` and `fields` (projection — essential; a 5e Actor can exceed 200 KB).
 
 ```jsonc
 {
   "ok": true,
-  "data": { /* ... */ },
-  "txn_id": "txn_01J...",        // present for mutations
+  "data": { },
+  "txn_id": "txn_01J...",
   "affected": [{ "uuid": "...", "name": "...", "op": "update" }],
-  "warnings": ["..."],
-  "truncated": false             // with next_cursor when true
+  "warnings": [],
+  "truncated": false
 }
 ```
 
-Errors are typed, never bare strings: `NOT_FOUND`, `PERMISSION_DENIED`,
-`CONFIRMATION_TIMEOUT`, `CONFIRMATION_DENIED`, `VALIDATION_FAILED`,
-`SYSTEM_UNSUPPORTED`, `BRIDGE_DISCONNECTED`, `RATE_LIMITED`, `READONLY_MODE`,
-`PAYLOAD_TOO_LARGE`. Each carries `hint` — a remediation the model can act on.
+Typed errors, each with an actionable `hint`: `NOT_FOUND`, `PERMISSION_DENIED`,
+`NO_GM_SESSION`, `CONFIRMATION_TIMEOUT`, `CONFIRMATION_DENIED`, `VALIDATION_FAILED`,
+`RATE_LIMITED`, `READONLY_MODE`, `PAYLOAD_TOO_LARGE`, `ASSET_REJECTED`, `UNSAFE_URL`.
 
-### 6.4 MCP resources (cheap context, no tool call)
+`NO_GM_SESSION` matters more than it looks — with a cloud agent it is the most
+common failure, and its hint must say plainly that a Foundry GM tab (or the Agent
+Seat) needs to be running.
 
-- `foundry://world/summary` — system, version, scene, users, module list
-- `foundry://scene/current` — active scene with placeable counts and token roster
-- `foundry://combat/current` — live initiative order with HP and conditions
-- `foundry://actors/index` — id/name/type/CR index of all actors
-- `foundry://journal/index`
-- `foundry://uuid/{uuid}` — any document by UUID
+### 6.4 MCP resources
 
-### 6.5 MCP prompts (workflow starters)
+`foundry://world/summary` · `foundry://scene/current` · `foundry://combat/current` ·
+`foundry://actors/index` · `foundry://journal/index` · `foundry://uuid/{uuid}`
+
+### 6.5 MCP prompts
 
 `prep_session`, `run_combat_round`, `improvise_npc`, `session_recap`,
 `statblock_from_text`, `build_encounter`, `dress_the_scene`, `audit_world`.
 
 ---
 
-## 7. Bridge protocol
+## 7. Protocols
 
-### 7.1 Envelope
+### 7.1 Agent ⇄ server (MCP over HTTPS)
+
+- **Transport:** Streamable HTTP at `POST /mcp`. HTTP+SSE fallback for older clients.
+- **Auth:** OAuth 2.1 with PKCE and dynamic client registration per the MCP authorization spec, advertised at `/.well-known/oauth-authorization-server` and `/.well-known/oauth-protected-resource`. Claude custom connectors expect OAuth; ChatGPT Developer mode also accepts unauthenticated servers — **do not offer that**, the endpoint has GM rights over a live world.
+  - Single-operator design: one admin user, credentials set at deploy time, no user database.
+  - A static bearer token is supported as a documented escape hatch for clients that cannot do OAuth.
+- **Hardening:** TLS required; `Origin` validation and DNS-rebinding protection; per-token rate limits; structured request logging with token redaction; optional allowlist of Anthropic/OpenAI egress ranges.
+
+**Implementation note:** OAuth 2.1 + DCR is a meaningful chunk of work — budget it
+explicitly in M1 rather than discovering it late. It is the price of the goal.
+
+### 7.2 Module ⇄ server (bridge over WSS)
 
 ```jsonc
 {
   "v": 1,
-  "id": "01J8XY...",           // ULID, correlates req/res
+  "id": "01J8XY...",
   "type": "req" | "res" | "event" | "hello" | "ping" | "pong",
-  "op": "documents.update",     // req only
+  "op": "documents.update",
   "payload": { },
-  "meta": { "dryRun": false, "txnGroup": null, "clientId": "claude-desktop", "ts": 0 }
+  "meta": { "dryRun": false, "txnGroup": null, "ts": 0 }
 }
 ```
 
-### 7.2 Handshake & auth
+Handshake: module reads a bridge token from module settings (generated on first
+run, shown with a copy button), connects to `wss://<host>/bridge`, sends `hello`
+with `{ token, worldId, systemId, foundryVersion, moduleVersion, userId, userRole }`.
+Server does a constant-time compare, rejects non-GM roles, and negotiates protocol
+version — mismatches produce a clear in-Foundry notification, not a silent failure.
 
-1. Module reads `bridgeToken` from module settings (generated on first run, shown in the settings UI with a copy button).
-2. Module connects to `ws://127.0.0.1:31415` and sends `hello` with `{ token, worldId, systemId, foundryVersion, moduleVersion, userId, userRole }`.
-3. Daemon validates the token (constant-time compare), rejects non-GM roles, and replies with its own version and negotiated protocol version.
-4. Version mismatch → structured error and a clear in-Foundry notification, not a silent failure.
+Heartbeat every 15s, 45s timeout, reconnect with jittered exponential backoff
+(1s → 30s, unlimited). Connection state is a coloured dot in the Foundry sidebar.
 
-Bind to `127.0.0.1` only by default. LAN binding (T4) is a separate setting that
-forces TLS and a long token, with an explicit warning.
+Frames cap at 1 MiB; oversized results are stored under a `result_ref` and paged
+via `session.fetch_result`. Images bypass this entirely (§5.11).
 
-### 7.3 Liveness
+### 7.3 Multiple GM sessions
 
-Heartbeat every 15s; 45s without a pong closes the socket. Module reconnects with
-exponential backoff (1s → 30s, jittered) and unlimited retries. Connection state
-is visible in the Foundry UI (a coloured dot in the sidebar) — never a mystery.
+If both a human GM and the Agent Seat are connected, operations route to a single
+designated executor (Agent Seat preferred when present) to avoid double-applying.
+Others receive events read-only.
 
-### 7.4 Large payloads
-
-Frames cap at 1 MiB. Larger results are stored server-side under a `result_ref`
-and fetched in pages via `session.fetch_result`. Actor documents in some systems
-exceed 200 KB; projection (`fields`) is the primary mitigation, refs the fallback.
-
-### 7.5 Events (module → server, unsolicited)
+### 7.4 Events
 
 `combat.turn_changed`, `combat.started`, `combat.ended`, `roll.completed`,
 `chat.message`, `token.moved`, `scene.activated`, `document.changed`,
 `confirmation.resolved`, `user.connected`.
 
-MCP has no reliable server-initiated push to the model mid-turn, so events are
-consumed two ways: a bounded ring buffer readable via `dice.await_event`
-(long-poll, configurable timeout, returns immediately if a matching event is
-already buffered), and — for the in-Foundry panel — direct callback, enabling true
-agentic loops ("run the goblins' turn, then wait for the players").
+Buffered in a bounded ring and read via `dice.await_event` with a cursor.
+
+**Constraint worth stating plainly:** over HTTPS through a cloud agent, long-polling
+is unreliable — proxies and gateways cut idle connections around 30–60s, and the
+agent only runs when it has the turn. Cap waits at 25s and return a cursor for
+resumption. Tight agentic loops ("run the goblins, then wait for the players to
+roll") work far better in a local setup than a cloud one. Async prep — the P1
+use case — is unaffected. Set expectations for P2 accordingly.
 
 ---
 
 ## 8. Safety, permissions, audit, undo
 
-This section is a requirement, not a disclaimer. An agent with GM rights can
-delete a campaign.
+An agent with GM rights can delete a campaign, and here it is reachable from the
+public internet. This section is a requirement, not a disclaimer.
 
 ### 8.1 Autonomy modes
 
 | Mode | Reads | Reversible writes | Destructive writes | Scripts |
 |---|---|---|---|---|
 | `readonly` | ✅ | ❌ | ❌ | ❌ |
-| `assist` **(default)** | ✅ | ✅ auto | ⚠️ confirm | ❌ |
-| `autonomous` | ✅ | ✅ auto | ✅ auto (logged) | ⚠️ confirm |
+| `assist` **(default)** | ✅ | ✅ auto | ⚠️ confirm in Foundry | ❌ |
+| `unattended` | ✅ | ✅ auto | ✅ auto + **forced snapshot first** | ❌ |
 | `expert` | ✅ | ✅ | ✅ | ⚠️ confirm |
 
-"Destructive" = deletes, ownership/permission changes, mass updates over the
-threshold (default 25 documents), scene activation, world setting writes.
+"Destructive" = deletes, ownership changes, mass updates past the threshold
+(default 25 documents), scene activation, world setting writes.
+
+**`unattended` exists because of the cloud-agent model.** In `assist`, a
+destructive op raises a dialog in the Foundry client — but during P1 prep from a
+phone, nobody is looking at that screen, and the op dies on a 60-second timeout.
+`unattended` swaps *prior confirmation* for *guaranteed reversibility*: an
+automatic snapshot of the affected collections before the operation, plus the
+normal transaction log. The GM chooses which trade they want, per session.
 
 ### 8.2 Per-tool permission matrix
 
-A settings UI grid: every tool × {allow, confirm, deny}. Mode presets seed it;
-the GM can override any cell. Persisted per world.
+A settings grid: every tool × {allow, confirm, deny}. Modes seed it; any cell can
+be overridden. Persisted per world.
 
-### 8.3 Confirmation UX
+### 8.3 Confirmation UX (`assist`)
 
-A non-blocking Foundry dialog showing: tool name, the model's `reason`, a rendered
-diff of the change (field-level, old → new), affected document count and names, and
-Approve / Approve-and-remember-for-this-session / Deny. 60-second timeout defaults
-to **deny**. Bulk operations show a paginated affected-document list.
+Non-blocking dialog: tool name, the agent's `reason`, a field-level diff, affected
+document names and count, and Approve / Approve-for-session / Deny. 60s timeout
+defaults to **deny**, and the resulting error tells the agent a human wasn't
+present so it can suggest `unattended`.
 
 ### 8.4 Transaction log & undo
 
-Every mutating op opens a transaction that records the **inverse operation** before
-applying:
+Each mutating op records its inverse before applying:
 
 | Forward | Inverse |
 |---|---|
 | create | delete by `_id` |
-| update | update with captured pre-state of the touched paths |
-| delete | create with full captured source data, preserving `_id` |
-| batch | inverses applied in reverse order |
+| update | update with captured pre-state of touched paths |
+| delete | create from full captured source, `keepId: true` |
+| batch | inverses replayed in reverse |
 
-Stored as a rolling buffer (default 50 transactions, configurable) in a world-scoped
-setting, with overflow spilled to `Data/foundry-ai-mcp/txn/*.jsonl`. Exposed as
-`session.undo({ txn_id? })` and as an Audit Log sidebar application with a per-entry
-Undo button.
+Rolling buffer (default 50) in a world setting, spilling to
+`Data/foundry-ai-mcp/txn/*.jsonl`. Exposed as `session.undo({ txn_id? })` and an
+Audit Log sidebar app with per-entry Undo.
 
-**Known undo limits — document these in the UI, not just here:** re-created
-documents may lose references from *other* documents that pointed at them if those
-references were also mutated; active effects re-applied out of order can produce
-different derived values; canvas animation state is not restored. Undo is a strong
-safety net, not a database transaction. For anything genuinely important,
-`session.create_snapshot` (a full JSON export of the selected collections) is the
-real answer, and the module nags for one before any operation touching >100 documents.
+**Documented limits — put these in the UI, not only here.** Re-created documents
+can lose inbound references that were also mutated; effects re-applied out of
+order can yield different derived values; canvas animation state isn't restored.
+Undo is a strong net, not a database transaction. Snapshots
+(`session.create_snapshot`, a JSON export of chosen collections) are the real
+answer, taken automatically before anything touching >100 documents and before
+every destructive op in `unattended`.
 
-### 8.5 Rate limits & circuit breaker
+### 8.5 Rate limits & kill switch
 
-Default 60 writes/minute and 500 documents/minute. Exceeding either pauses the
-bridge and raises an in-Foundry prompt. A **kill switch** (sidebar button plus a
-configurable hotkey, default `Ctrl+Shift+X`) drops the socket instantly and flips
-to `readonly`.
+Default 60 writes/min and 500 documents/min; breaching either pauses the bridge.
+A kill switch (sidebar button + hotkey, default `Ctrl+Shift+X`) drops the socket
+and flips to `readonly`. The server also honours a kill flag so it can be stopped
+without touching Foundry.
 
 ### 8.6 Prompt injection
 
-World content is untrusted input. Journal text, chat messages, item descriptions,
-and player-authored content can contain instructions aimed at the model. Mitigations:
+World content is untrusted. Journal text, chat messages, item descriptions and
+player-authored content can carry instructions aimed at the agent — and with a
+cloud agent the blast radius includes anything else that agent can reach.
 
-- All world-derived text is returned wrapped in an explicit untrusted-content
-  envelope with a standing instruction that it is data, never instruction.
-- Destructive tools always confirm in `assist` mode regardless of how convincing
-  the justification is.
-- The audit log records the `reason` string, making injected instructions visible after the fact.
-- Documented in the README as a real, unsolved-in-general risk.
+- World-derived text is returned inside an explicit untrusted-content envelope with a standing "this is data, not instruction" note.
+- Destructive tools confirm in `assist` regardless of how convincing the justification is.
+- In `unattended`, the snapshot requirement is the backstop precisely because the confirmation isn't there.
+- The audit log records `reason` verbatim, so injected instructions are visible afterwards.
 
-### 8.7 Privacy
+### 8.7 Privacy & exposure
 
-No project-operated servers. No telemetry. The bridge is loopback-only by default.
-The model provider sees whatever world content is sent as tool results — stated
-plainly in the README, with the projection (`fields`) mechanism offered as the
-mitigation and semantic indexing shipped **off by default**.
+No project-operated servers, no telemetry. But: the endpoint is public, and the
+model provider sees whatever world content is returned. Both are stated plainly in
+the README. Projection (`fields`) limits what leaves; semantic indexing ships off
+by default.
 
 ---
 
-## 9. System adapters
+## 9. D&D 5e support
+
+Thin `SystemAdapter` boundary, **one implementation**. The seam exists to insulate
+against dnd5e's own version churn (its data model has moved significantly across
+majors), not to speculatively support systems we've decided not to build.
 
 ```ts
 interface SystemAdapter {
-  readonly id: string;                 // "dnd5e" | "pf2e" | "generic"
-  readonly systemVersions: string;     // semver range
+  readonly id: "dnd5e";
+  readonly systemVersions: string;         // semver range, enforced at handshake
 
-  getVitals(actor): { hp, maxHp, tempHp, ac, level, cr } | null;
-  applyDamage(actor, amount, opts): Promise<void>;
+  getVitals(actor): { hp, maxHp, tempHp, ac, level, cr };
+  applyDamage(actor, amount, opts): Promise<void>;   // types, resistances, immunities
   applyHealing(actor, amount): Promise<void>;
-  conditions(): Array<{ id, label, icon }>;
+  conditions(): Array<{ id, label, icon }>;          // from CONFIG.statusEffects
   toggleCondition(token, id, active): Promise<void>;
-  rollCheck(actor, kind, key, opts): Promise<Roll>;   // ability/save/skill/attack
+  rollCheck(actor, kind, key, opts): Promise<Roll>;  // ability | save | skill | attack | tool
   initiativeFormula(combatant): string;
   parseStatblock(text): Promise<ActorData>;
   encounterBudget(partyLevels, difficulty): { xp, crRange };
   itemUse(actor, item, opts): Promise<void>;
+  spellSlots(actor): Array<{ level, value, max }>;
   resources(actor): Array<{ key, label, value, max }>;
 }
 ```
 
-**`generic` adapter** (always present, always the fallback): derives everything it
-can from `describe_schema` plus Foundry core concepts (token bars, `CONFIG.statusEffects`,
-`Actor#getRollData`). Degrades to `SYSTEM_UNSUPPORTED` with a hint pointing at the
-generic document tools rather than failing opaquely.
-
-**Shipped v1:** `generic`, `dnd5e`. **v1.0:** `pf2e`.
-**Third-party:** `game.modules.get("foundry-ai-mcp").api.registerAdapter(adapter)`
-during the `foundry-ai-mcp.ready` hook.
+Version guard: the module reads the installed dnd5e version at handshake and
+refuses (with a clear message) outside its tested range, rather than silently
+writing to fields that moved. A second adapter is a post-1.0 conversation, and the
+interface will be refactored *then*, against a real second case.
 
 ---
 
 ## 10. Memory & retrieval (optional, off by default)
 
-- Local index of journals, actor/item descriptions, chat history, and selected
-  compendia, stored under `Data/foundry-ai-mcp/index/` (sqlite-vec or LanceDB in
-  the MCP server process).
-- Embeddings: local by default (`transformers.js`, `all-MiniLM-L6-v2`), with an
-  option to use a provider embedding endpoint.
-- Incremental reindex driven by `document.changed` bridge events, debounced.
-- Exposed as `journal.search_journals({ mode: "semantic" | "keyword" | "hybrid" })`.
-- **Campaign log**: an opt-in journal the module appends per-session summaries to,
-  giving the agent long-term continuity without re-reading the whole world.
+Local index of journals, actor/item descriptions, chat history and selected
+compendia, stored on the **server** host under `data/index/` (sqlite-vec or
+LanceDB). Embeddings local by default (`transformers.js`, `all-MiniLM-L6-v2`).
+Incremental reindex from `document.changed` events, debounced. Exposed via
+`journal.search_journals({ mode: "semantic" | "keyword" | "hybrid" })`.
+
+Opt-in **campaign log**: a journal the module appends per-session summaries to,
+giving the agent continuity without re-reading the world.
 
 ---
 
-## 11. In-Foundry chat panel (M5)
+## 11. In-Foundry chat panel — deferred
 
-A Foundry `ApplicationV2` sidebar tab.
-
-**Requirements**
-- BYO credentials: Anthropic API key, or an OpenAI-compatible base URL + key (so
-  Ollama/LM Studio/OpenRouter work). Stored in a **client-scoped** setting (per
-  user, not synced into the world database).
-- Streaming responses with visible tool-call cards: name, arguments, diff preview,
-  result, and an inline Undo button.
-- Threads persisted per user; a session thread and named saved threads.
-- Slash commands mirroring the MCP prompts (`/recap`, `/encounter`, …).
-- Context injection: current scene, selected tokens, active combat, and targeted
-  tokens are attached automatically as structured context.
-- Respects the same permission matrix and confirmation flow as the MCP path.
-- **Never** stores API keys in the world database or exposes them to non-GM users.
-
-**Note on cost model.** The MCP path uses the GM's existing Claude subscription
-(no per-token billing). The in-Foundry panel calls the API directly and *is*
-per-token billed. Surface this clearly in the UI — it is the single most likely
-source of user surprise in the whole project.
+**Not in v1.** Rationale, recorded so it isn't relitigated: the chat app is
+already the interface, a panel would duplicate it, and it would introduce
+per-token API billing alongside a subscription-billed path — the most likely
+source of user confusion in the whole design. The capability registry (§4.6)
+keeps the seam open if this is ever wanted.
 
 ---
 
@@ -573,17 +606,18 @@ source of user surprise in the whole project.
 
 | Area | Requirement |
 |---|---|
-| Foundry compatibility | **v14 LTS only** — `minimum: "14"`, `verified: "14"` (current stable 14.367). No v13 support: v13 and v14 require mutually exclusive Node versions and v14 reworked scenes, regions and effects. ApplicationV2 UI only; no jQuery-era APIs |
-| Systems | any; `generic` adapter guarantees baseline function |
-| Browsers | Chromium 120+, Foundry Electron app; Firefox best-effort |
-| Node | Node 22 LTS+ for the MCP server (its own process — independent of Foundry's runtime, which on v14 is Node 24). ESM; TypeScript strict |
-| Latency | p95 < 400 ms for local reads; < 1 s for single-document writes |
-| Payloads | 25-item default page size; 1 MiB frame cap; projection encouraged |
-| Footprint | module bundle < 500 KB gzipped; no runtime CDN fetches |
-| i18n | all user-facing strings in `lang/en.json`; no hardcoded strings |
-| Accessibility | keyboard-navigable panel, ARIA live region for streaming, respects Foundry themes and `prefers-reduced-motion` |
-| Offline | full function with a local model endpoint; no mandatory internet |
-| Logging | structured, level-configurable, redacts tokens and API keys |
+| Foundry | v14 LTS only — `minimum: "14"`, `verified: "14"` (stable 14.367). ApplicationV2 UI only |
+| System | dnd5e, version range enforced at handshake |
+| Browsers | Chromium 120+, Foundry Electron app; headless Chromium for the Agent Seat |
+| Node | 22 LTS+ for the server (its own process; Foundry v14's own runtime is Node 24) |
+| Transport | Streamable HTTP MCP; TLS required; OAuth 2.1 + PKCE + DCR |
+| Latency | p95 < 800 ms for reads end-to-end from the agent (cloud round-trip included) |
+| Payloads | 25-item default page; 1 MiB frames; 20 MB asset cap |
+| Availability | Server and Agent Seat auto-restart; module reconnects indefinitely |
+| Footprint | Module bundle < 500 KB gzipped; no runtime CDN fetches; server < 200 MB RSS without the index |
+| i18n | All strings in `lang/en.json` |
+| Accessibility | Keyboard-navigable dialogs, Foundry theme support, `prefers-reduced-motion` |
+| Logging | Structured, level-configurable, redacts tokens and OAuth secrets |
 
 ---
 
@@ -592,76 +626,65 @@ source of user surprise in the whole project.
 ```
 foundry-ai-mcp/
 ├─ packages/
-│  ├─ shared/                 # protocol types + zod schemas (source of truth)
-│  │  └─ src/{protocol,ops,errors}.ts
-│  ├─ module/                 # Foundry module — TS, bundled with Vite
+│  ├─ shared/            # protocol types + zod schemas (single source of truth)
+│  ├─ module/            # Foundry v14 module — TS, bundled with Vite
 │  │  ├─ module.json
-│  │  ├─ src/
-│  │  │  ├─ main.ts
-│  │  │  ├─ bridge/           # ws client, handshake, reconnect, framing
-│  │  │  ├─ ops/              # one handler file per namespace (§6.2)
-│  │  │  ├─ safety/           # modes, matrix, confirm dialog, rate limit
-│  │  │  ├─ txn/              # transaction log, inverse ops, undo, snapshots
-│  │  │  ├─ adapters/         # generic, dnd5e, pf2e, registry
-│  │  │  ├─ ui/               # chat panel, settings, audit log (AppV2)
-│  │  │  └─ schema/           # describe_schema introspection
-│  │  ├─ styles/  templates/  lang/
-│  └─ server/                 # MCP server + bridge daemon
-│     └─ src/
-│        ├─ stdio.ts  daemon.ts  bridge.ts
-│        ├─ tools/  resources/  prompts/
-│        └─ memory/
-├─ docs/                      # this spec, protocol ref, tool ref, guides
-├─ tests/{unit,e2e,quench}/
-└─ .github/workflows/
+│  │  └─ src/
+│  │     ├─ main.ts
+│  │     ├─ bridge/      # wss client, handshake, reconnect, framing
+│  │     ├─ ops/         # one handler per namespace (§6.2)
+│  │     ├─ assets/      # staged fetch → File → FilePicker.upload
+│  │     ├─ safety/      # modes, matrix, confirm dialog, rate limits
+│  │     ├─ txn/         # inverse ops, undo, snapshots
+│  │     ├─ dnd5e/       # the one adapter
+│  │     ├─ schema/      # describe_schema introspection
+│  │     └─ ui/          # settings, audit log, connection indicator (AppV2)
+│  ├─ server/            # MCP over HTTPS + bridge hub
+│  │  └─ src/
+│  │     ├─ http.ts  mcp.ts  oauth.ts  bridge.ts  stdio.ts
+│  │     ├─ assets/    # intake, SSRF guard, validation, staging
+│  │     ├─ tools/ resources/ prompts/
+│  │     └─ memory/
+│  └─ agent-seat/        # optional headless Chromium GM session
+├─ deploy/               # docker-compose, Caddy/Traefik, tunnel guides
+├─ docs/  tests/  .github/workflows/
 ```
 
-**Stack:** TypeScript everywhere · zod (single schema source → MCP JSON Schema,
-Anthropic tool defs, and runtime validation) · `@modelcontextprotocol/sdk` · `ws` ·
-Vite (module bundle) · tsup (server) · vitest · Playwright · Quench (in-Foundry tests) ·
-changesets for versioning.
+**Stack:** TypeScript · zod (one schema source → MCP JSON Schema + runtime
+validation) · `@modelcontextprotocol/sdk` · `ws` · Vite (module) · tsup (server) ·
+Playwright (Agent Seat + E2E) · vitest · Quench (in-Foundry tests) · changesets.
 
-**`module.json` essentials:** `id`, `title`, `description`, `version`, `authors`,
+`module.json`: `id`, `title`, `description`, `version`, `authors`,
 `compatibility: { minimum: "14", verified: "14" }`, `esmodules`, `styles`,
-`languages`, `socket: true`, `url`, `manifest`, `download`, `relationships`,
-`flags`. `socket: true` is required for the module's own Foundry socket namespace
-(used for GM↔player interactions such as roll requests).
+`languages`, `socket: true`, `url`, `manifest`, `download`, `relationships`
+(dnd5e), `flags`. `socket: true` is for the module's *own* Foundry socket namespace
+(roll requests, showing handouts) — a different thing from the bridge WebSocket.
 
 ---
 
 ## 14. Testing & CI
 
-- **Unit (vitest)** — op handlers against a mocked `game`/`canvas`; inverse-op
-  correctness (property test: `apply(inverse(apply(op))) == identity`); schema
-  validation; protocol framing.
-- **Integration (vitest)** — MCP server ↔ daemon ↔ fake module client; full tool
-  round-trips; error taxonomy; rate limits; reconnection.
-- **In-Foundry (Quench)** — real Document CRUD, undo fidelity, adapter behaviour,
-  run against a live world.
-- **E2E (Playwright)** — a Dockerised Foundry (`felddy/foundryvtt`) with dnd5e and
-  pf2e installed; log in as GM, load the module, drive a scripted session, assert
-  world state. Gated on a licence secret; skipped on forks.
-- **Golden-path evals** — a fixture world plus ~30 natural-language tasks scored on
-  correct tool selection and end state. This is the only way to catch tool-description
-  regressions, and it should exist from M1.
-- **CI** — lint, typecheck, unit + integration on every PR; E2E nightly; release
-  builds `module.zip` + `module.json` and publishes the npm package.
+- **Unit (vitest)** — op handlers against a mocked `game`/`canvas`; inverse-op correctness as a property test (`apply(inverse(apply(op))) == identity`); SSRF guard against a table of hostile URLs; asset magic-byte validation; protocol framing.
+- **Integration** — server ↔ fake module client; full tool round-trips; OAuth flow; error taxonomy; rate limits; reconnection.
+- **In-Foundry (Quench)** — real Document CRUD, undo fidelity, `FilePicker.upload`, dnd5e adapter behaviour.
+- **E2E (Playwright)** — Dockerised Foundry v14 + dnd5e; the Agent Seat is itself Playwright, so E2E reuses it. Drive a scripted session, assert world state. Gated on a licence secret, skipped on forks.
+- **Security** — an SSRF/path-traversal/upload suite as a first-class gate, not a nice-to-have. This project accepts model-chosen URLs and writes files to disk from a public endpoint.
+- **Golden-path evals** — a fixture world plus ~30 natural-language tasks scored on tool selection and end state. Build it in M1; it is the only defence against tool-description regressions.
+- **CI** — lint, typecheck, unit, integration, security suite per PR; E2E nightly; releases build `module.zip` + `module.json` and publish the npm package and a container image.
 
 ---
 
 ## 15. Distribution
 
-1. **Foundry module** — GitHub Release with `module.zip` and a stable
-   `module.json` URL; submitted to the Foundry package registry once past v0.5.
-2. **MCP server** — npm `@rashthepay/foundry-mcp`, runnable via `npx`; config
-   snippet for `claude_desktop_config.json` and `.mcp.json` in the docs.
-3. **One-click** — a `.mcpb` extension bundle for Claude Desktop (bundles the Node
-   runtime and the server; user pastes only the bridge token).
-4. **Docs site** — install guide per topology, tool reference generated from the
-   zod schemas, safety guide, adapter authoring guide.
+1. **Module** — GitHub Release with `module.zip` and a stable `module.json` URL; Foundry package registry submission once past v0.5.
+2. **Server** — npm `@rashthepay/foundry-mcp` and a published container image.
+3. **`deploy/docker-compose.yml`** — server + optional Agent Seat + Caddy for automatic TLS. The one-command path, and the one most users should take.
+4. **Docs** — a guide per deployment option (§4.3), connector setup for Cowork and for ChatGPT Developer mode, a security checklist, and a tool reference generated from the zod schemas.
 
-Installation success criterion: a GM who has never used a terminal is issuing their
-first command within ten minutes, following the Claude Desktop path.
+Success criterion: a GM comfortable with Docker is issuing their first command
+within an hour, including TLS and OAuth setup.
+
+MIT, permanently. No paid tier, no hosted option, no CLA.
 
 ---
 
@@ -669,17 +692,17 @@ first command within ten minutes, following the Claude Desktop path.
 
 | Milestone | Scope | Exit criterion | Est. |
 |---|---|---|---|
-| **M0** Spike | module ↔ daemon ↔ stdio MCP; 3 tools (`get_world_info`, `query_documents`, `send_chat_message`) | Claude Desktop posts a chat message into a live world | 1 wk |
-| **M1** Read core | generic query/get/`describe_schema`, resources, compendium search, scene + combat state, tool profiles, eval harness | An agent can answer any question about the world | 2–3 wk |
-| **M2** Safe writes | document CRUD, dry-run, transaction log, undo, confirmation dialog, permission matrix, audit UI, kill switch | Nothing the agent does is unrecoverable | 3 wk |
-| **M3** Table ops | tokens, canvas, walls/lights, combat control, dice, roll requests, chat, audio, journals; `dnd5e` adapter | A full combat encounter run end-to-end by voice-of-agent | 3 wk |
-| **M4** Authoring | statblock import, encounter builder, quest/journal generation, RollTables, compendium import/export, macros | Session prep from notes to placed encounters | 3 wk |
-| **M5** In-Foundry panel | AppV2 sidebar, BYO key, streaming, tool cards, threads, slash commands | No alt-tab needed to run a session | 3 wk |
-| **M6** v1.0 | semantic memory, campaign log, `pf2e` adapter, i18n, `.mcpb` bundle, registry submission, docs site | Public release | 3 wk |
-| **Post-1.0** | image/map generation, TTS/STT, hosted relay for mobile, player-facing restricted assistant, more adapters | — | — |
+| **M0** Spike | module ⇄ bridge ⇄ HTTPS MCP over a tunnel; 3 tools; bearer auth only | Cowork posts a chat message into a live world | 1–2 wk |
+| **M1** Transport & reads | OAuth 2.1 + PKCE + DCR, hardening, generic query/get/`describe_schema`, resources, compendium search, scene + combat state, tool profiles, eval harness | The agent can answer any question about the world, over a real connector | 3–4 wk |
+| **M2** Safe writes | document CRUD, dry-run, transaction log, undo, snapshots, confirmation dialog, permission matrix, `unattended` mode, audit UI, kill switch | Nothing the agent does is unrecoverable | 3 wk |
+| **M3** Table ops | tokens, canvas, walls/lights, multi-level scenes, combat, dice, roll requests, chat, audio, journals; dnd5e adapter | A full encounter run end-to-end from the chat app | 3 wk |
+| **M4** Assets | URL fetch, `/assets/upload`, staging + `FilePicker.upload`, SSRF and validation suite, artwork binding | "Find a portrait for this NPC and set it" works | 2 wk |
+| **M5** Agent Seat | headless Chromium GM session, compose file, health and auto-restart | Prep from a phone with no tab open | 1–2 wk |
+| **M6** v1.0 | semantic memory, campaign log, statblock import, encounter builder, macros, i18n, docs site, registry submission | Public release | 3 wk |
+| Post-1.0 | player-facing restricted assistant, voice, second system adapter, in-Foundry panel | — | — |
 
-~18 weeks of focused part-time work to v1.0. M0–M2 (~7 weeks) is the point at which
-it is genuinely useful and safe; consider that the real MVP.
+~17–20 weeks part-time. **M0–M2 (~8 weeks) is the real MVP** — useful and safe.
+M4 and M5 are what make the P1 phone-prep story actually land, and both are small.
 
 ---
 
@@ -687,81 +710,58 @@ it is genuinely useful and safe; consider that the real MVP.
 
 | # | Risk | Severity | Mitigation |
 |---|---|---|---|
-| R1 | Foundry v15 API churn breaks the module | High | Thin abstraction over Foundry APIs in `ops/`; compatibility matrix in CI; verified-version discipline. Building on the v14 LTS baseline buys the longest runway available before this bites |
-| R2 | Game-system data divergence makes writes wrong | High | `describe_schema` first, adapters second, dry-run always; never guess `system.*` paths |
-| R3 | Agent destroys world data | High | §8 in full — this is why M2 precedes M3 |
-| R4 | Prompt injection via world content | Medium | §8.6; destructive ops always confirm |
-| R5 | Tool-surface context bloat degrades accuracy | Medium | Profiles, projection, resources over tools, eval harness |
-| R6 | GM tab must stay open | Medium | Documented up front; connection indicator; auto-reconnect |
-| R7 | Undo fidelity gaps | Medium | Snapshots for large ops; explicit documented limits |
-| R8 | Users confuse subscription (MCP) vs per-token (panel) cost | Medium | Explicit cost labelling in the panel UI |
-| R9 | Licensing — shipping game content | Medium | Ship no content; import from the user's own compendia only |
-| R10 | Concurrency: agent and human edit the same document | Low | Optimistic concurrency via `_stats.modifiedTime`; conflict → error with a diff |
-| R11 | Token leakage in logs/screenshots | Low | Redaction in logging; token masked in the settings UI |
+| R1 | Public endpoint with GM rights is compromised | **High** | OAuth 2.1, TLS, rate limits, egress allowlist, `readonly` default on fresh installs, security checklist in docs, kill switch |
+| R2 | SSRF / malicious upload via model-chosen URLs | **High** | §5.11 guards; dedicated security test suite in CI |
+| R3 | Agent destroys world data with nobody watching | **High** | §8 in full; forced snapshots in `unattended`; M2 precedes M3 |
+| R4 | Prompt injection from world content, amplified by a cloud agent's other reach | **High** | §8.6; untrusted-content envelopes; destructive ops gated |
+| R5 | Connector platform changes (transport, auth, tool limits) break the integration | Medium | Both target clients supported; stdio retained; transport isolated behind one module |
+| R6 | No GM session connected — the most common runtime failure | Medium | Agent Seat; `NO_GM_SESSION` with an actionable hint; connection indicator |
+| R7 | dnd5e data model churn | Medium | `describe_schema` first; version range enforced at handshake |
+| R8 | Foundry v15 API churn | Medium | Thin abstraction in `ops/`; v14 LTS baseline buys the longest runway |
+| R9 | Cloud round-trip latency makes live play sluggish | Medium | Projection, resources over tools, batching; set expectations for P2 (§7.4) |
+| R10 | Undo fidelity gaps | Medium | Snapshots for large ops; limits documented in the UI |
+| R11 | Base64 image ingestion is prohibitively expensive in tokens | Low | URL and HTTP-upload paths are primary; base64 capped at 256 KB with a warning |
+| R12 | Hosted Foundry providers restrict automation (Agent Seat) | Low | Opt-in; check terms; system works without it |
+| R13 | Agent and human edit the same document concurrently | Low | Optimistic concurrency on `_stats.modifiedTime`; conflict returns a diff |
 
 ---
 
-## 18. Notes & gotchas worth knowing before day one
+## 18. Notes & gotchas
 
-- **Modules are client-side only.** There is no server-side hook to run this
-  headlessly. Everything in §4.1 follows from that.
-- **v14 is the LTS baseline; do not carry v13 shims.** v13 and v14 require
-  mutually exclusive Node versions (v13 does not run on Node 24; v14 requires it),
-  so no one is straddling both on a single install anyway. Supporting a single
-  generation removes an entire class of conditional code from `ops/` and the
-  adapters. Note this is a constraint on the *Foundry server's* runtime — the MCP
-  server is a separate process and picks its own Node.
-- **v14 reworked scenes, regions, effects and fog.** Multi-level scenes, the new
-  regions system, shared fog of war and revised effects handling are v14-era
-  features. Verify the exact class and field names against the v14.367 API docs
-  before writing the canvas ops — several of them moved namespaces from v13.
-- **`socket: true` in `module.json`** is needed for the module's own
-  GM↔player socket namespace (roll requests, showing handouts), which is separate
-  from the external bridge WebSocket. Don't conflate them.
-- **UUIDs, not IDs.** Always address documents by UUID (`Actor.xyz`,
-  `Scene.abc.Token.def`, `Compendium.dnd5e.monsters.Actor.ghi`). It is the only
-  identifier that survives being embedded, packed, or moved.
-- **`Actor#getRollData()`** is the correct data context for evaluating formulas —
-  don't hand-roll formula substitution.
-- **Batch, don't loop.** `Actor.createDocuments([...])` and
-  `scene.updateEmbeddedDocuments("Token", [...])` in one call, not N calls. Foundry
-  broadcasts each call to every client; looping is the single biggest performance
-  mistake in Foundry module code.
-- **`ApplicationV2` + `HandlebarsApplicationMixin`** for all UI. AppV1 is gone; targeting v14 only means never writing a line of it.
-- **Token vs Actor.** A Token on a scene may be linked (shares the Actor) or unlinked
-  (has its own `delta`). Writing HP to the wrong one is the classic bug — always
-  resolve through `token.actor`.
-- **`CONFIG.statusEffects`** is the system-agnostic condition list; don't hardcode 5e conditions.
-- **Roll modes** are set via `rollMode` in the ChatMessage data or
-  `game.settings.get("core","rollMode")` — blind GM rolls need both the message
-  flag and correct whisper targets.
-- **Scene "activate" vs "view"** are different: activate pulls all players to the
-  scene; view only moves the GM. Agents will get this wrong; make the tool
-  parameter explicit and default to `view`.
-- **Compendium packs are locked by default** — unlock, write, re-lock, and restore
-  the prior lock state even on failure.
-- **`_id` preservation on re-create** requires `keepId: true`; undo of a delete is
-  wrong without it.
-- **Foundry's "Data" path** is where snapshots and the index belong; reach it via
-  `FilePicker`/`foundry.applications.apps.FilePicker` APIs, not `fs`.
-- **Test against two systems from the start.** A world with only dnd5e installed
-  will let generic-path bugs live until they're expensive to find.
-- **Prior art is worth reading, not forking**: `adambdooley/foundry-vtt-mcp`
-  (closest architecture — a WebSocket bridge module plus a stdio MCP server, 41
-  tools), `TheStranjer/foundry-vtt-mcp` (direct-WebSocket, minimal),
-  `laurigates/foundryvtt-mcp`. This spec's additions over all three are the
-  transaction/undo layer, runtime schema discovery, the permission matrix, and the
-  second front door.
+- **Modules are client-side only.** No server-side hook, no headless mode except a real browser. Everything in §4.1 follows.
+- **Cowork cannot use local MCP servers.** `claude_desktop_config.json` servers are unavailable in Cowork and claude.ai; connectors are brokered from Anthropic's cloud even when the client app runs on your machine. Any design starting from "stdio on localhost" fails the goal on day one.
+- **v14 only; carry no v13 shims.** v13 and v14 need mutually exclusive Node versions (v13 won't run on Node 24, v14 requires it), so nobody straddles both. This is a constraint on the *Foundry server's* runtime — the MCP server picks its own Node.
+- **v14 reworked scenes, regions, effects and fog.** Multi-level scenes, the new regions system, shared fog of war and revised effects handling are v14-era. Verify class and field names against the 14.367 API docs; several moved namespaces, and there is a lot of v13-era Foundry code on the internet that a model will happily imitate.
+- **Base64 images through a tool call are a trap.** A 1024×1024 PNG is ~1.5 MB, ~2 MB base64, on the order of 500k tokens. It will not fit and it would be absurdly expensive if it did. `curl` to `/assets/upload`, or a URL. The 256 KB cap on the inline path exists to make the failure early and obvious rather than expensive.
+- **The browser can't fetch arbitrary internet images** — CORS blocks most hosts. That's why the server fetches and stages, and the module only ever fetches from the server's own origin (§5.11).
+- **`FilePicker` upload** needs the `FILES_UPLOAD` permission (GMs have it) and lives at `foundry.applications.apps.FilePicker` in the v13+ namespacing — confirm against v14 before writing it.
+- **SVG uploads are an XSS vector** in Foundry, which renders them inline. Denied by default.
+- **UUIDs, not IDs.** `Actor.xyz`, `Scene.abc.Token.def`, `Compendium.dnd5e.monsters.Actor.ghi` — the only identifier that survives embedding, packing or moving.
+- **`Actor#getRollData()`** is the right context for formula evaluation. Don't hand-roll substitution.
+- **Batch, don't loop.** `Actor.createDocuments([...])`, `scene.updateEmbeddedDocuments("Token", [...])` — one call, not N. Foundry broadcasts every call to every client; looping is the classic Foundry performance bug.
+- **Token vs Actor.** A token is linked (shares the Actor) or unlinked (has its own delta). Writing HP to the wrong one is *the* classic bug — always resolve via `token.actor`.
+- **`CONFIG.statusEffects`** is the condition source of truth even in a 5e-only build; dnd5e populates it and modules extend it.
+- **Scene activate ≠ view.** Activate pulls every player to the scene; view moves only the current user. Agents will get this wrong — make the parameter explicit and default to `view`.
+- **Compendium packs are locked by default.** Unlock, write, re-lock — and restore the prior lock state on failure too.
+- **`keepId: true`** is required when re-creating a deleted document, or undo is silently wrong.
+- **Two GM sessions need an elected executor** (§7.3), or every write applies twice.
+- **Prior art worth reading, not forking:** `adambdooley/foundry-vtt-mcp` (closest architecture, but localhost/stdio — the part this project can't reuse), `TheStranjer/foundry-vtt-mcp`, `laurigates/foundryvtt-mcp`.
 
 ---
 
-## 19. Open decisions
+## 19. Decisions settled
 
-These change the build materially and are worth settling before M1.
+| # | Decision |
+|---|---|
+| 1 | **Clients:** Claude Cowork and ChatGPT. Cloud agents ⇒ public HTTPS MCP + OAuth. stdio kept for local dev only. |
+| 2 | **System:** D&D 5e only. Thin adapter seam, one implementation, no speculative registry. |
+| 3 | **Licence:** MIT forever. No open-core, no hosted service, no project infrastructure. |
+| 4 | **In-Foundry panel:** deferred (§11). |
+| 5 | **Images:** ingest only — URL, HTTP upload, or capped inline bytes. No generation tool. |
+| 6 | **Autonomy default:** `assist`, with `unattended` for away-from-desk prep. Fresh installs start `readonly`. |
+| 7 | **Escape hatch:** ship `execute_script`, expert-only and opt-in. |
 
-1. **Primary chat surface** — external MCP client only (cheaper, ships sooner), in-Foundry panel only, or both? *Recommendation: both, MCP first; the panel is M5 precisely because it can wait.*
-2. **Systems for v1** — `generic` + dnd5e only, or pf2e from the start? *Recommendation: generic + dnd5e; pf2e at v1.0.*
-3. **Autonomy default** — is `assist` (confirm destructive) the right out-of-box posture? *Recommendation: yes, with a first-run wizard that explains the modes.*
-4. **Escape hatch** — ship `execute_script` at all? *Recommendation: yes, expert-only and opt-in; without it "anything a GM can do" is untrue.*
-5. **Distribution** — free MIT forever, or open-core with paid convenience (installers, hosted relay, map generation)? Affects whether project infrastructure exists at all.
-6. **Map/image generation** — in scope, or an integration point for ComfyUI/other? *Recommendation: integration point, post-1.0.*
+### Still open
+
+- **Agent Seat in v1 or post-1.0?** Speced as M5 because it's small and it's what makes phone-prep real, but it is the one component that could slip without breaking anything else.
+- **Multi-world support** — one server instance per world, or one server brokering several? One-per-world is simpler and assumed throughout; revisit if you run more than one campaign.
