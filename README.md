@@ -26,4 +26,4 @@ Optionally, an in-Foundry chat sidebar so you never have to alt-tab mid-session.
 
 ## Targets
 
-Foundry VTT v13 minimum, v14.365 verified. Node 20+. MIT licensed.
+Foundry VTT **v14 (LTS)** only. Node 22+ for the MCP server. MIT licensed.

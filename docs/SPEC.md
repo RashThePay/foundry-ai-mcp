@@ -2,7 +2,7 @@
 
 **Project:** `foundry-ai-mcp`
 **Status:** Draft v0.1 (pre-implementation)
-**Target:** Foundry Virtual Tabletop v13 (minimum) / v14.365 (verified)
+**Target:** Foundry Virtual Tabletop v14 (LTS) — minimum and verified. v13 is not supported.
 **License:** MIT
 
 ---
@@ -155,7 +155,8 @@ This is the scope definition. Each row is in v1 unless marked.
 
 Actor, Item, Scene, JournalEntry, RollTable, Playlist, Macro, Cards, Combat,
 ChatMessage, Folder, User, Setting, plus embedded documents: ActiveEffect, Token,
-Tile, Wall, AmbientLight, AmbientSound, Drawing, MeasuredTemplate, Note, Region,
+Tile, Wall, AmbientLight, AmbientSound, Drawing, MeasuredTemplate, Note, Region
+(v14's reworked regions system, including region behaviours),
 Combatant, JournalEntryPage, TableResult, PlaylistSound, and Items owned by Actors.
 
 Operations: create, read, update (deep-merge or replace), delete, duplicate, move
@@ -173,7 +174,9 @@ delete world compendiums, lock/unlock, folder structure inside packs.
 Create/clone/delete scenes; set background, foreground, dimensions, padding, grid
 (type, size, units, distance), initial view; activate vs. view; scene navigation
 order. Configure lighting: darkness level, global illumination, illumination colours,
-fog exploration, vision. Weather effects. Token vision toggles.
+fog exploration, vision. Weather effects. Token vision toggles. **v14 additions in
+scope:** multi-level scenes (level definitions, per-level placement and token
+elevation binding) and shared fog of war (per-user vs. party-shared exploration).
 
 Place and edit walls (with door type, door state, sense restrictions, thresholds,
 directional flags), lights (dim/bright radius, angle, animation, colour), sounds
@@ -570,10 +573,10 @@ source of user surprise in the whole project.
 
 | Area | Requirement |
 |---|---|
-| Foundry compatibility | minimum v13, verified v14.365; ApplicationV2 UI only; no jQuery-era APIs |
+| Foundry compatibility | **v14 LTS only** — `minimum: "14"`, `verified: "14"` (current stable 14.367). No v13 support: v13 and v14 require mutually exclusive Node versions and v14 reworked scenes, regions and effects. ApplicationV2 UI only; no jQuery-era APIs |
 | Systems | any; `generic` adapter guarantees baseline function |
 | Browsers | Chromium 120+, Foundry Electron app; Firefox best-effort |
-| Node | 20 LTS+ for the MCP server; ESM; TypeScript strict |
+| Node | Node 22 LTS+ for the MCP server (its own process — independent of Foundry's runtime, which on v14 is Node 24). ESM; TypeScript strict |
 | Latency | p95 < 400 ms for local reads; < 1 s for single-document writes |
 | Payloads | 25-item default page size; 1 MiB frame cap; projection encouraged |
 | Footprint | module bundle < 500 KB gzipped; no runtime CDN fetches |
@@ -619,7 +622,7 @@ Vite (module bundle) · tsup (server) · vitest · Playwright · Quench (in-Foun
 changesets for versioning.
 
 **`module.json` essentials:** `id`, `title`, `description`, `version`, `authors`,
-`compatibility: { minimum: "13", verified: "14" }`, `esmodules`, `styles`,
+`compatibility: { minimum: "14", verified: "14" }`, `esmodules`, `styles`,
 `languages`, `socket: true`, `url`, `manifest`, `download`, `relationships`,
 `flags`. `socket: true` is required for the module's own Foundry socket namespace
 (used for GM↔player interactions such as roll requests).
@@ -684,7 +687,7 @@ it is genuinely useful and safe; consider that the real MVP.
 
 | # | Risk | Severity | Mitigation |
 |---|---|---|---|
-| R1 | Foundry v15 API churn breaks the module | High | Thin abstraction over Foundry APIs in `ops/`; compatibility matrix in CI; verified-version discipline |
+| R1 | Foundry v15 API churn breaks the module | High | Thin abstraction over Foundry APIs in `ops/`; compatibility matrix in CI; verified-version discipline. Building on the v14 LTS baseline buys the longest runway available before this bites |
 | R2 | Game-system data divergence makes writes wrong | High | `describe_schema` first, adapters second, dry-run always; never guess `system.*` paths |
 | R3 | Agent destroys world data | High | §8 in full — this is why M2 precedes M3 |
 | R4 | Prompt injection via world content | Medium | §8.6; destructive ops always confirm |
@@ -702,6 +705,16 @@ it is genuinely useful and safe; consider that the real MVP.
 
 - **Modules are client-side only.** There is no server-side hook to run this
   headlessly. Everything in §4.1 follows from that.
+- **v14 is the LTS baseline; do not carry v13 shims.** v13 and v14 require
+  mutually exclusive Node versions (v13 does not run on Node 24; v14 requires it),
+  so no one is straddling both on a single install anyway. Supporting a single
+  generation removes an entire class of conditional code from `ops/` and the
+  adapters. Note this is a constraint on the *Foundry server's* runtime — the MCP
+  server is a separate process and picks its own Node.
+- **v14 reworked scenes, regions, effects and fog.** Multi-level scenes, the new
+  regions system, shared fog of war and revised effects handling are v14-era
+  features. Verify the exact class and field names against the v14.367 API docs
+  before writing the canvas ops — several of them moved namespaces from v13.
 - **`socket: true` in `module.json`** is needed for the module's own
   GM↔player socket namespace (roll requests, showing handouts), which is separate
   from the external bridge WebSocket. Don't conflate them.
@@ -714,7 +727,7 @@ it is genuinely useful and safe; consider that the real MVP.
   `scene.updateEmbeddedDocuments("Token", [...])` in one call, not N calls. Foundry
   broadcasts each call to every client; looping is the single biggest performance
   mistake in Foundry module code.
-- **`ApplicationV2` + `HandlebarsApplicationMixin`** for all UI. AppV1 is deprecated in v13+.
+- **`ApplicationV2` + `HandlebarsApplicationMixin`** for all UI. AppV1 is gone; targeting v14 only means never writing a line of it.
 - **Token vs Actor.** A Token on a scene may be linked (shares the Actor) or unlinked
   (has its own `delta`). Writing HP to the wrong one is the classic bug — always
   resolve through `token.actor`.
